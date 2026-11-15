@@ -899,7 +899,7 @@
   <div id="leagueTableView">
     <div id="leagueTableWrap"></div>
     <button type="button" class="btn btn-ghost u-6" id="leagueEditBtn">Edit / Paste Table</button>
-    <div class="hint u-2">Tap the star to highlight your own team. Position is worked out automatically from points (then goal difference, where the Results log covers every game) — just re-paste the whole table whenever the league site updates. Tap a team name to see how they've done.</div>
+    <div class="hint u-2">Tap the star to highlight your own team. Position is worked out from points; teams level on points stay in the order you pasted them, so paste in the league site's order — just re-paste the whole table whenever the league site updates. Tap a team name to see how they've done.</div>
   </div>
 
   <div id="leagueResultsView" class="is-hidden">
@@ -3575,15 +3575,9 @@ function renderLeagueTable(){
     const s = recordOf(gamesFor(res, r.name));
     return Object.assign({}, r, { _s: s, _complete: s.p === r.p });
   });
-  // Points first; level on points, goal difference then goals scored (only where the log covers every game).
-  rows.sort((a,b) => {
-    if(b.pts !== a.pts) return b.pts - a.pts;
-    if(a._complete && b._complete && (a._s.p > 0 || b._s.p > 0)){
-      if(b._s.gd !== a._s.gd) return b._s.gd - a._s.gd;
-      if(b._s.gf !== a._s.gf) return b._s.gf - a._s.gf;
-    }
-    return 0;
-  });
+  // Points first; teams level on points keep the order they were pasted in (the league site's own order).
+  // The league doesn't publish goal difference, so it isn't used as a tiebreak. Array.sort is stable.
+  rows.sort((a,b) => b.pts - a.pts);
   let html = `<div class="league-table">
     <div class="league-head">
       <span class="league-pos">#</span>
