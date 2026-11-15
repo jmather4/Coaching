@@ -1532,7 +1532,7 @@ const PREDS_FIXTURES_SEED = [
 ].map((row,i) => ({
   id: 'fx-preds-seed-'+i,
   opponent: row[0], date: row[1], time: row[2], venue: row[3], homeAway: row[4],
-  competition: 'EMJFL Division 1', friendly: false,
+  competition: 'EMJFL Division 1', friendly: false, matchLengthMins: 80, playersPerSide: 11,
   squad: [], played: false, scoreUs: 0, scoreThem: 0, scorers: {}, potm: '', notes: '', leagueApplied: false,
   coachDuty: [], coachAvailability: {}, availability: {}
 }));
@@ -1827,7 +1827,7 @@ function mergeFixtureFeed(rows){
       list.push({
         id: 'fx-ft-'+r.fixtureId, ftId: r.fixtureId, opponent: r.opponent, date: r.date, time: r.time, venue: r.venue,
         homeAway: r.homeAway, competition: r.competition || defaultCompetition(r.team), friendly:false,
-        matchLengthMins:0, playersPerSide:0, squad:[], played:false, scoreUs:0, scoreThem:0, scorers:{}, potm:'', notes:'',
+        matchLengthMins:(MATCH_DEFAULTS[r.team]||{}).mins||0, playersPerSide:(MATCH_DEFAULTS[r.team]||{}).side||0, squad:[], played:false, scoreUs:0, scoreThem:0, scorers:{}, potm:'', notes:'',
         leagueApplied:false, coachDuty:[], coachAvailability:{}, availability:{},
         ftStatus: /normal/i.test(r.status) ? '' : r.status, ftChange: { at: r.changedAt || new Date().toISOString(), added:true }
       });
@@ -2280,6 +2280,7 @@ function persistLeague(){
   catch(e){ showToast('Save failed'); }
 }
 
+const MATCH_DEFAULTS = { preds:{ mins:80, side:11 }, meerkats:{ mins:60, side:9 } };
 function loadFixtures(){
   try{
     const raw = localStorage.getItem('coachlog_fixtures');
@@ -2293,6 +2294,12 @@ function loadFixtures(){
       if(!f.coachDuty) f.coachDuty = [];
       if(!f.coachAvailability) f.coachAvailability = {};
       if(!f.availability) f.availability = {};
+    });
+  });
+  ['preds','meerkats'].forEach(team=>{
+    fixtures[team].forEach(f=>{
+      if(!f.matchLengthMins) f.matchLengthMins = MATCH_DEFAULTS[team].mins;
+      if(!f.playersPerSide) f.playersPerSide = MATCH_DEFAULTS[team].side;
     });
   });
   try{
@@ -3017,7 +3024,7 @@ function migrateLegacyGames(){
         if(existingIds.has(id)) return;
         fixtures.meerkats.push({
           id, opponent: g.opponent || '', date: g.date, time: '', venue: '',
-          competition: defaultCompetition('meerkats'), friendly: false, homeAway: 'home',
+          competition: defaultCompetition('meerkats'), friendly: false, homeAway: 'home', matchLengthMins: 60, playersPerSide: 9,
           squad: (g.players||[]).slice(), played: true,
           scoreUs: g.scoreUs || 0, scoreThem: g.scoreThem || 0,
           scorers: {...(g.scorers||{})}, potm: g.potm || '', notes: g.notes || '',
@@ -4246,7 +4253,7 @@ function findOrCreateFixtureByDate(team, iso){
     f = {
       id: 'fx-'+Date.now()+'-'+Math.floor(Math.random()*1000),
       opponent: 'TBC', date: iso, time:'', venue:'', competition: defaultCompetition(team), friendly:false,
-      matchLengthMins:0, playersPerSide:0, homeAway:'home',
+      matchLengthMins:MATCH_DEFAULTS[team].mins, playersPerSide:MATCH_DEFAULTS[team].side, homeAway:'home',
       squad: [], played: false, scoreUs: 0, scoreThem: 0, scorers: {}, potm: '', notes: '', leagueApplied: false,
       coachDuty: [], coachAvailability: {}, availability: {}
     };
@@ -4512,8 +4519,8 @@ function openFixtureSetup(id){
   document.getElementById('fxTime').value = f ? (f.time || '') : '';
   document.getElementById('fxVenue').value = f ? (f.venue || '') : '';
   document.getElementById('fxCompetition').value = f ? (f.competition || '') : defaultCompetition(activeFixtureTeam);
-  document.getElementById('fxMatchLength').value = f && f.matchLengthMins ? f.matchLengthMins : '';
-  document.getElementById('fxPlayersPerSide').value = f && f.playersPerSide ? f.playersPerSide : '';
+  document.getElementById('fxMatchLength').value = f ? (f.matchLengthMins || '') : MATCH_DEFAULTS[activeFixtureTeam].mins;
+  document.getElementById('fxPlayersPerSide').value = f ? (f.playersPerSide || '') : MATCH_DEFAULTS[activeFixtureTeam].side;
   document.getElementById('fxFriendly').checked = f ? !!f.friendly : false;
   fxHomeAwayValue = f ? (f.homeAway || 'home') : 'home';
   document.querySelectorAll('#fxHomeAwaySeg button').forEach(b=>b.classList.toggle('active', b.dataset.val===fxHomeAwayValue));
