@@ -899,6 +899,8 @@
   <div id="leagueTableView">
     <div id="leagueTableWrap"></div>
     <button type="button" class="btn btn-ghost u-6" id="leagueEditBtn">Edit / Paste Table</button>
+    <button type="button" class="btn btn-ghost u-6" id="ftSetupBtn">Full-Time auto-update</button>
+    <div class="hint u-2" id="ftStatus"></div>
     <div class="hint u-2">Tap the star to highlight your own team. Position is worked out from points; teams level on points stay in the order you pasted them, so paste in the league site's order — just re-paste the whole table whenever the league site updates. Tap a team name to see how they've done.</div>
   </div>
 
@@ -1138,6 +1140,27 @@ Stockport Villa FC U15 Allstars 0"></textarea>
 </div>
 
 <!-- League results: paste a block -->
+<div class="sheet-backdrop" id="ftBackdrop">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 id="ftTitle">Full-Time auto-update</h2>
+    <div class="field">
+      <label for="ftTableSnippet">League table code snippet</label>
+      <textarea id="ftTableSnippet" placeholder="Paste the whole snippet from Full-Time here"></textarea>
+    </div>
+    <div class="field">
+      <label for="ftResultsSnippet">Results code snippet (optional)</label>
+      <textarea id="ftResultsSnippet" placeholder="Paste the whole snippet from Full-Time here"></textarea>
+      <div class="hint">In Full-Time admin, create a code snippet for this team's division (one for the league table, one for results) and paste each one in whole. The app then reads the table and results from Full-Time by itself when you open the League tab. Leave a box empty to keep pasting that part by hand.</div>
+      <div class="hint" id="ftMsg"></div>
+    </div>
+    <div class="sheet-actions">
+      <button type="button" class="btn btn-ghost" id="ftCancel">Close</button>
+      <button type="button" class="btn btn-primary" id="ftSave">Save &amp; update now</button>
+    </div>
+  </div>
+</div>
+
 <div class="sheet-backdrop" id="lgrPasteBackdrop">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -1604,7 +1627,7 @@ const SPREADSHEET_ID = '1VFWgZQowXyHJ0MBpWVMLkliyqN-rLjHfA8Ikwk6Scm8';
 let bootLoading = true;   // true while init() seeds empty local storage; seeding must never be queued/pushed over real Sheet data
 const SHEET_TAB = 'Data';      // tab name inside that sheet
 
-const SYNC_KEYS = ['coachlog_drills','coachlog_players','coachlog_coaches','coachlog_sessions','coachlog_games','coachlog_docs','coachlog_league','coachlog_fixtures','coachlog_results','coachlog_cup','coachlog_preds_players','coachlog_preds_coaches'];
+const SYNC_KEYS = ['coachlog_drills','coachlog_players','coachlog_coaches','coachlog_sessions','coachlog_games','coachlog_docs','coachlog_league','coachlog_fixtures','coachlog_results','coachlog_cup','coachlog_ft_feed','coachlog_preds_players','coachlog_preds_coaches'];
 let pendingSync = new Set();
 try{ pendingSync = new Set(JSON.parse(localStorage.getItem('coachlog_pending_sync') || '[]')); }catch(e){}
 
@@ -1954,7 +1977,7 @@ async function afterSignIn(){
   } else {
     setSyncStatus('error');
   }
-  loadDrills(); loadPlayers(); loadCoaches(); loadSessions(); loadGames(); loadDocs(); loadLeague(); loadFixtures(); loadResults(); loadCup(); loadPredsPlayers(); loadPredsCoaches();
+  loadDrills(); loadPlayers(); loadCoaches(); loadSessions(); loadGames(); loadDocs(); loadLeague(); loadFixtures(); loadResults(); loadCup(); loadFtFeed(); loadPredsPlayers(); loadPredsCoaches();
   if(drillsNeedPush){ persist(); showToast('Kept drills from this device and re-saved them to the Sheet', 6000); }
   migrateLegacyGames();
   seedPredsFixturesIfEmpty();
@@ -3558,6 +3581,8 @@ function lgNextOpponent(team){
 // -- table view --
 function renderLeague(){
   renderTicker();
+  ftRenderStatus();
+  ftAutoRefresh();
   document.querySelectorAll('#leagueSeg button').forEach(b=>b.classList.toggle('active', b.dataset.val===activeLeagueTeam));
   document.querySelectorAll('#leagueViewSeg button').forEach(b=>b.classList.toggle('active', b.dataset.view===activeLeagueView));
   document.getElementById('leagueTableView').classList.toggle('is-hidden', activeLeagueView !== 'table');
@@ -3868,25 +3893,14 @@ function parseResultLines(text){
   });
   return { out, skipped };
 }
-const lgrPasteBackdrop = document.getElementById('lgrPasteBackdrop');
-document.getElementById('lgrPasteBtn').onclick = () => {
-  document.getElementById('lgrPasteText').value = '';
-  document.getElementById('lgrPasteMsg').textContent = '';
-  lgrPasteBackdrop.classList.add('open');
-};
-document.getElementById('lgrPasteCancel').onclick = () => lgrPasteBackdrop.classList.remove('open');
-lgrPasteBackdrop.onclick = (e) => { if(e.target === lgrPasteBackdrop) lgrPasteBackdrop.classList.remove('open'); };
-document.getElementById('lgrPasteSave').onclick = () => {
-  const team = activeLeagueTeam;
-  const ta = document.getElementById('lgrPasteText');
-  const msgEl = document.getElementById('lgrPasteMsg');
-  const parsed = parseResultLines(ta.value);
-  if(parsed.out.length === 0){ msgEl.textContent = 'Nothing readable in that — each line needs: Date, Home team, Home goals, Away goals, Away team.'; return; }
+// Shared by the paste box and the Full-Time auto-update: adds new results, updates changed scores,
+// never doubles up a game already recorded in Fixtures. Saves when anything changed.
+function mergeResultRows(team, rows){
   const own = ownResultRows(team);
   const list = leagueResults[team];
   let added = 0, already = 0, updated = 0;
   const diffs = [];
-  parsed.out.forEach(r => {
+  rows.forEach(r => {
     const home = canonTeam(team, r.home), away = canonTeam(team, r.away);
     const same = (x) => x.date === r.date && lgNorm(x.home) === lgNorm(home) && lgNorm(x.away) === lgNorm(away);
     const o = own.find(same);
@@ -3904,6 +3918,23 @@ document.getElementById('lgrPasteSave').onclick = () => {
     added++;
   });
   if(added || updated) persistResults();
+  return { added, already, updated, diffs };
+}
+const lgrPasteBackdrop = document.getElementById('lgrPasteBackdrop');
+document.getElementById('lgrPasteBtn').onclick = () => {
+  document.getElementById('lgrPasteText').value = '';
+  document.getElementById('lgrPasteMsg').textContent = '';
+  lgrPasteBackdrop.classList.add('open');
+};
+document.getElementById('lgrPasteCancel').onclick = () => lgrPasteBackdrop.classList.remove('open');
+lgrPasteBackdrop.onclick = (e) => { if(e.target === lgrPasteBackdrop) lgrPasteBackdrop.classList.remove('open'); };
+document.getElementById('lgrPasteSave').onclick = () => {
+  const team = activeLeagueTeam;
+  const ta = document.getElementById('lgrPasteText');
+  const msgEl = document.getElementById('lgrPasteMsg');
+  const parsed = parseResultLines(ta.value);
+  if(parsed.out.length === 0){ msgEl.textContent = 'Nothing readable in that — each line needs: Date, Home team, Home goals, Away goals, Away team.'; return; }
+  const { added, already, updated, diffs } = mergeResultRows(team, parsed.out);
   let msg = `${added} added`;
   if(already) msg += `, ${already} already there`;
   if(updated) msg += `, ${updated} score${updated > 1 ? 's' : ''} updated`;
@@ -4200,6 +4231,269 @@ document.getElementById('leagueEditSave').onclick = () => {
   leagueBackdrop.classList.remove('open');
   showToast('Table saved');
   renderLeague();
+};
+
+// ---- Full-Time auto-update (league table + results) ----
+// Full-Time has no public API and blocks requests from servers, so this uses the FA's own supported route:
+// the "code snippet" a league/club admin generates in Full-Time. The snippet is loaded on the coach's own
+// device inside a sandboxed, invisible frame (it can't see this app's data or sign-in), and the table it draws
+// is read back and fed through the same code as a manual paste. Nothing is replaced unless it reads cleanly.
+// Snippet details sync to the Sheet as 'coachlog_ft_feed'; "last checked" times stay on this device.
+const FT_HOST = 'fulltime.thefa.com';
+const FT_DEFAULT_SRC = 'https://fulltime.thefa.com/client/api/cs1.js';
+const FT_AUTO_GAP_MS = 3 * 60 * 60 * 1000;      // auto-check at most every 3 hours per team
+const FT_LAST_KEY = 'coachlog_ft_last';
+let ftFeed = { preds: { table: null, results: null }, meerkats: { table: null, results: null } };
+let ftBusy = false;
+function ftBlankFeed(){ return { preds: { table: null, results: null }, meerkats: { table: null, results: null } }; }
+function ftCleanSnip(x){
+  if(!x || typeof x !== 'object') return null;
+  const code = String(x.code||''), divId = String(x.divId||''), varName = String(x.varName||''), src = String(x.src||'');
+  if(!/^\d{3,20}$/.test(code) || !/^[A-Za-z][A-Za-z0-9_-]{0,60}$/.test(divId) || !/^[A-Za-z_][A-Za-z0-9_]{0,30}$/.test(varName)) return null;
+  if(!ftSafeSrc(src)) return null;
+  return { code, divId, varName, src: ftSafeSrc(src) };
+}
+// Only ever load a script from Full-Time itself, over https.
+function ftSafeSrc(src){
+  try{
+    const u = new URL(String(src||'').replace(/^\/\//, 'https://').replace(/^http:/i, 'https:'));
+    if(u.protocol !== 'https:' || u.hostname !== FT_HOST || u.username || u.password) return '';
+    if(/["'<>\s\\]/.test(u.href)) return '';
+    return u.href;
+  }catch(e){ return ''; }
+}
+function loadFtFeed(){
+  let data = null;
+  try{ data = JSON.parse(localStorage.getItem('coachlog_ft_feed') || 'null'); }catch(e){ data = null; }
+  const out = ftBlankFeed();
+  ['preds','meerkats'].forEach(t => {
+    const d = data && data[t];
+    if(d){ out[t].table = ftCleanSnip(d.table); out[t].results = ftCleanSnip(d.results); }
+  });
+  ftFeed = out;
+}
+function persistFtFeed(){
+  try{
+    const raw = JSON.stringify(ftFeed);
+    localStorage.setItem('coachlog_ft_feed', raw);
+    pushKey('coachlog_ft_feed', raw);
+  }catch(e){ showToast('Save failed'); }
+}
+function ftLast(){
+  try{ const v = JSON.parse(localStorage.getItem(FT_LAST_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; }catch(e){ return {}; }
+}
+function ftSetLast(team, patch){
+  const all = ftLast();
+  all[team] = Object.assign({}, all[team] || {}, patch);
+  try{ localStorage.setItem(FT_LAST_KEY, JSON.stringify(all)); }catch(e){}
+}
+// Reads a pasted Full-Time snippet (or just its number) down to the four safe pieces we need.
+function ftParseSnippet(text){
+  const t = String(text||'').trim();
+  if(!t) return null;
+  if(/^\d{3,20}$/.test(t)) return ftCleanSnip({ code: t, divId: 'lrep' + t, varName: 'lrcode', src: FT_DEFAULT_SRC });
+  const v = t.match(/(?:var\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['"](\d{3,20})['"]/);
+  if(!v) return null;
+  const d = t.match(/<div[^>]*\bid\s*=\s*["']?([A-Za-z][A-Za-z0-9_-]*)/i);
+  const s = t.match(/<script[^>]*\bsrc\s*=\s*["']?([^"'\s>]+)/i);
+  return ftCleanSnip({ code: v[2], divId: d ? d[1] : 'lrep' + v[2], varName: v[1], src: s ? s[1] : FT_DEFAULT_SRC });
+}
+// Loads one snippet in a sandboxed frame and resolves with the text of every table row it draws ([] if nothing came).
+function ftFetchRows(snip){
+  return new Promise(resolve => {
+    const token = 'ft' + Date.now() + Math.floor(Math.random() * 1e9);
+    const frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.setAttribute('tabindex', '-1');
+    frame.title = 'Full-Time data';
+    frame.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;border:0;visibility:hidden;';
+    let done = false;
+    const finish = (rows) => {
+      if(done) return;
+      done = true;
+      window.removeEventListener('message', onMsg);
+      clearTimeout(timer);
+      frame.remove();
+      resolve(Array.isArray(rows) ? rows : []);
+    };
+    const onMsg = (e) => {
+      if(e.source !== frame.contentWindow || !e.data || e.data.ftFeed !== token) return;
+      const rows = Array.isArray(e.data.rows) ? e.data.rows.slice(0, 2000).map(r => Array.isArray(r) ? r.slice(0, 40).map(c => String(c).slice(0, 200)) : []) : [];
+      finish(rows);
+    };
+    const timer = setTimeout(() => finish([]), 30000);
+    window.addEventListener('message', onMsg);
+    const reader = '(function(){var n=0,last=-1;function grab(){var rows=[].slice.call(document.querySelectorAll("tr")).map(function(tr){return [].slice.call(tr.children).map(function(c){return (c.innerText||c.textContent||"").replace(/\\s+/g," ").trim();});}).filter(function(r){return r.length;});n++;if((rows.length>1&&rows.length===last)||n>44){parent.postMessage({ftFeed:"' + token + '",rows:rows},"*");return;}last=rows.length;setTimeout(grab,500);}setTimeout(grab,500);})();';
+    frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head><body>'
+      + '<div id="' + snip.divId + '">Data loading....</div>'
+      + '<script>var ' + snip.varName + ' = "' + snip.code + '";<\/script>'
+      + '<script src="' + snip.src + '"><\/script>'
+      + '<script>' + reader + '<\/script>'
+      + '</body></html>';
+    document.body.appendChild(frame);
+  });
+}
+// Table rows -> [{name,p,w,d,l,pts}], found by the column headings so extra columns (GD, form...) don't matter.
+function ftTableFromRows(rows){
+  const norm = c => String(c||'').toLowerCase().replace(/[^a-z]/g, '');
+  const isP = c => ['p','pl','pld','played'].includes(c);
+  const isPts = c => ['pts','points','pt'].includes(c);
+  const hi = rows.findIndex(r => { const h = r.map(norm); return h.some(isP) && h.some(isPts); });
+  if(hi === -1) return [];
+  const h = rows[hi].map(norm);
+  const find = (...names) => h.findIndex(c => names.includes(c));
+  const ip = h.findIndex(isP), iw = find('w','won'), id = find('d','drawn'), il = find('l','lost'), ipts = h.findIndex(isPts);
+  let it = find('team','teams','club','teamname');
+  const out = [];
+  rows.slice(hi + 1).forEach(r => {
+    // a data row can be the same width as the heading row, or one cell different (position/crest columns)
+    const off = r.length - h.length;
+    const cell = i => (i === -1 ? '' : String(r[i + (i > 0 ? off : 0)] !== undefined ? r[i + (i > 0 ? off : 0)] : '').trim());
+    const num = i => { const v = cell(i); return /^-?\d+$/.test(v) ? parseInt(v, 10) : null; };
+    const p = num(ip), pts = num(ipts);
+    if(p === null || pts === null) return;
+    let name = it !== -1 ? cell(it) : '';
+    if(!name || /^\d+$/.test(name)) name = (r.find(c => /[A-Za-z]{2}/.test(c)) || '').trim();
+    if(!name) return;
+    out.push({ name, p, w: num(iw) || 0, d: num(id) || 0, l: num(il) || 0, pts });
+  });
+  return out;
+}
+// Replace the stored table with Full-Time's, keeping each team's id and the "my team" star. Returns a status word.
+function ftApplyTable(team, parsed){
+  const old = leagueTables[team] || [];
+  if(parsed.length < 3) return 'unreadable';
+  if(parsed.filter(r => r.w + r.d + r.l === r.p).length < parsed.length * 0.8) return 'unreadable';   // columns didn't line up
+  if(old.length >= 4 && parsed.length < Math.ceil(old.length / 2)) return 'unreadable';   // half the league missing: don't trust it
+  const used = new Set();
+  const next = parsed.map((r, i) => {
+    let ex = old.find(o => !used.has(o.id) && lgNorm(o.name) === lgNorm(r.name));
+    if(!ex){ const c = old.filter(o => !used.has(o.id) && lgSame(o.name, r.name)); if(c.length === 1) ex = c[0]; }
+    if(ex) used.add(ex.id);
+    return { id: ex ? ex.id : 'lg-ft-' + Date.now() + '-' + i, name: r.name, p: r.p, w: r.w, d: r.d, l: r.l, pts: r.pts, mine: ex ? !!ex.mine : false };
+  });
+  if(old.some(o => o.mine) && !next.some(n => n.mine)) return 'unreadable';   // would lose track of our own team
+  if(JSON.stringify(next) === JSON.stringify(old)) return 'same';
+  leagueTables[team] = next;
+  persistLeague();
+  return 'updated';
+}
+function ftResultsFromRows(rows){
+  return parseResultLines(rows.map(r => r.join('\t')).join('\n')).out;
+}
+// Fetch and apply whatever is set up for one team. Never throws; records what happened for the status line.
+async function ftRefreshTeam(team){
+  const cfg = ftFeed[team] || {};
+  const res = { at: new Date().toISOString(), table: '', results: '', added: 0, updated: 0, diffs: 0 };
+  if(cfg.table){
+    const rows = await ftFetchRows(cfg.table);
+    res.table = rows.length ? ftApplyTable(team, ftTableFromRows(rows)) : 'nodata';
+  }
+  if(cfg.results){
+    const rows = await ftFetchRows(cfg.results);
+    if(!rows.length) res.results = 'nodata';
+    else {
+      const parsed = ftResultsFromRows(rows);
+      if(!parsed.length) res.results = 'unreadable';
+      else {
+        const m = mergeResultRows(team, parsed);
+        res.added = m.added; res.updated = m.updated; res.diffs = m.diffs.length;
+        res.results = (m.added || m.updated) ? 'updated' : 'same';
+      }
+    }
+  }
+  ftSetLast(team, res);
+  if(res.table === 'updated' || res.table === 'same') ftSetLast(team, { tableOkAt: res.at });
+  if(res.results === 'updated' || res.results === 'same') ftSetLast(team, { resultsOkAt: res.at });
+  return res;
+}
+function ftSummary(res){
+  const word = { updated: 'updated', same: 'no change', nodata: 'nothing came back from Full-Time', unreadable: "came back but couldn't be read, so nothing was changed" };
+  const bits = [];
+  if(res.table) bits.push('Table: ' + word[res.table]);
+  if(res.results){
+    let r = 'Results: ' + word[res.results];
+    if(res.results === 'updated') r = `Results: ${res.added} added` + (res.updated ? `, ${res.updated} score${res.updated > 1 ? 's' : ''} updated` : '');
+    if(res.diffs) r += ` (${res.diffs} differ from what you recorded in Fixtures)`;
+    bits.push(r);
+  }
+  return bits.join('. ');
+}
+function ftFmtWhen(iso){
+  const d = new Date(iso);
+  if(!iso || isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function ftRenderStatus(){
+  const el = document.getElementById('ftStatus');
+  if(!el) return;
+  const cfg = ftFeed[activeLeagueTeam] || {};
+  if(!cfg.table && !cfg.results){ el.textContent = ''; return; }
+  const last = ftLast()[activeLeagueTeam];
+  if(ftBusy){ el.textContent = 'Checking Full-Time…'; return; }
+  if(!last || !last.at){ el.textContent = 'Full-Time auto-update is set up — not checked yet.'; return; }
+  let msg = 'Full-Time checked ' + ftFmtWhen(last.at) + '. ' + ftSummary(last) + '.';
+  if(cfg.table && last.table !== 'updated' && last.table !== 'same'){
+    msg += last.tableOkAt ? ' Table shown is from ' + ftFmtWhen(last.tableOkAt) + '.' : ' Table shown is the last one pasted by hand.';
+  }
+  el.textContent = msg;
+}
+async function ftRefresh(team, manual){
+  if(ftBusy) return null;
+  const cfg = ftFeed[team] || {};
+  if(!cfg.table && !cfg.results) return null;
+  ftBusy = true;
+  ftRenderStatus();
+  let res = null;
+  try{ res = await ftRefreshTeam(team); }catch(e){ res = null; }
+  ftBusy = false;
+  const changed = res && (res.table === 'updated' || res.results === 'updated');
+  if(changed && !manual) showToast('League updated from Full-Time', 4000);
+  if(changed) renderLeague(); else ftRenderStatus();
+  return res;
+}
+// Called whenever the League tab is drawn: quietly re-checks if it's been a while. Cheap when there's nothing to do.
+function ftAutoRefresh(){
+  if(ftBusy || bootLoading || navigator.onLine === false) return;
+  const team = activeLeagueTeam, cfg = ftFeed[team] || {};
+  if(!cfg.table && !cfg.results) return;
+  const panel = document.getElementById('tab-league');
+  if(panel && panel.classList.contains('is-hidden')) return;
+  const last = ftLast()[team];
+  if(last && last.at && (Date.now() - new Date(last.at).getTime()) < FT_AUTO_GAP_MS) return;
+  ftRefresh(team, false);
+}
+const ftBackdrop = document.getElementById('ftBackdrop');
+function ftSnippetText(snip){
+  if(!snip) return '';
+  return '<div id="' + snip.divId + '">Data loading....</div>\n<script>var ' + snip.varName + " = '" + snip.code + "'<\/script>\n" + '<script src="' + snip.src + '"><\/script>';
+}
+document.getElementById('ftSetupBtn').onclick = () => {
+  const cfg = ftFeed[activeLeagueTeam] || {};
+  document.getElementById('ftTitle').textContent = 'Full-Time auto-update — ' + (activeLeagueTeam === 'preds' ? 'Preds' : 'Meerkats');
+  document.getElementById('ftTableSnippet').value = ftSnippetText(cfg.table);
+  document.getElementById('ftResultsSnippet').value = ftSnippetText(cfg.results);
+  document.getElementById('ftMsg').textContent = '';
+  ftBackdrop.classList.add('open');
+};
+document.getElementById('ftCancel').onclick = () => ftBackdrop.classList.remove('open');
+ftBackdrop.onclick = (e) => { if(e.target === ftBackdrop) ftBackdrop.classList.remove('open'); };
+document.getElementById('ftSave').onclick = async () => {
+  const team = activeLeagueTeam;
+  const msgEl = document.getElementById('ftMsg');
+  const tText = document.getElementById('ftTableSnippet').value.trim();
+  const rText = document.getElementById('ftResultsSnippet').value.trim();
+  const tSnip = ftParseSnippet(tText), rSnip = ftParseSnippet(rText);
+  if(tText && !tSnip){ msgEl.textContent = "The league table snippet doesn't look like a Full-Time code snippet — paste the whole thing, exactly as Full-Time gives it."; return; }
+  if(rText && !rSnip){ msgEl.textContent = "The results snippet doesn't look like a Full-Time code snippet — paste the whole thing, exactly as Full-Time gives it."; return; }
+  if(ftBusy){ msgEl.textContent = 'Already checking Full-Time — try again in a moment.'; return; }
+  ftFeed[team] = { table: tSnip, results: rSnip };
+  persistFtFeed();
+  if(!tSnip && !rSnip){ ftBackdrop.classList.remove('open'); showToast('Full-Time auto-update turned off'); ftRenderStatus(); return; }
+  msgEl.textContent = 'Checking Full-Time… this can take up to half a minute.';
+  const res = await ftRefresh(team, true);
+  msgEl.textContent = res ? ftSummary(res) + '.' : "Couldn't check Full-Time just now.";
 };
 
 // ---- Availability / Duty bulk import ----
@@ -5757,6 +6051,7 @@ function init(){
   loadFixtures();
   loadResults();
   loadCup();
+  loadFtFeed();
   loadPredsPlayers();
   loadPredsCoaches();
   loadSummaryCollapsed();
@@ -5791,7 +6086,7 @@ document.getElementById('syncDot').onclick = async () => {
       }
     });
     loadDrills(); loadPlayers(); loadCoaches(); loadSessions(); loadGames(); loadDocs();
-    loadLeague(); loadFixtures(); loadResults(); loadCup(); loadPredsPlayers(); loadPredsCoaches();
+    loadLeague(); loadFixtures(); loadResults(); loadCup(); loadFtFeed(); loadPredsPlayers(); loadPredsCoaches();
     if(drillsNeedPush2){ persist(); showToast('Kept drills from this device and re-saved them to the Sheet', 6000); }
     migrateLegacyGames();
     seedPredsFixturesIfEmpty();
